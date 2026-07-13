@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BuckTrax — Trail Camera Intelligence Platform</title>
+<meta name="description" content="Engineering wiki for BuckTrax: a self-hosted trail camera intelligence platform. Architecture, classification pipeline, operations runbook, and decision log.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================================
+   TOKENS — palette pulled from the BuckTrax mark
+   ============================================================ */
+:root{
+  --ink:#0C110E; --moss:#141C17; --edge-c:#1F2A23; --raise:#182119;
+  --bone:#E9E3D5; --sage:#93A290; --dim:#65735F;
+  --blaze:#E4571F; --ir:#A6C4AE;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --sans:"IBM Plex Sans",system-ui,sans-serif;
+  --disp:"Archivo",system-ui,sans-serif;
+  --edge:1px solid var(--edge-c);
+  --side:264px; --toc:210px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--ink);color:var(--bone);
+  font-family:var(--sans);font-size:15.5px;line-height:1.68;
+  -webkit-font-smoothing:antialiased;
+}
+body::after{ /* sensor grain */
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:200;opacity:.13;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+}
+a{color:var(--blaze);text-decoration:none;border-bottom:1px solid rgba(228,87,31,.3)}
+a:hover,a:focus-visible{border-bottom-color:var(--blaze)}
+:focus-visible{outline:2px solid var(--blaze);outline-offset:3px}
+
+/* OSD strip — borrowed from a trail cam's burnt-in data bar */
+.osd{
+  font-family:var(--mono);font-size:10.5px;font-weight:600;
+  letter-spacing:.17em;text-transform:uppercase;color:var(--dim);
+  display:flex;align-items:center;gap:10px;margin:0;
+}
+.osd::before{content:"";width:6px;height:6px;background:var(--blaze);flex:none}
+.osd b{color:var(--ir);font-weight:600}
+
+/* ============================================================
+   SHELL
+   ============================================================ */
+.shell{display:grid;grid-template-columns:var(--side) minmax(0,1fr);min-height:100vh}
+
+/* ---- sidebar ---- */
+.side{
+  border-right:var(--edge);background:var(--moss);
+  position:sticky;top:0;height:100vh;overflow-y:auto;
+  display:flex;flex-direction:column;z-index:100;
+}
+.brand{display:flex;align-items:center;gap:9px;padding:18px 20px;border-bottom:var(--edge)}
+.brand svg{width:22px;height:22px;flex:none}
+.brand span{font-family:var(--disp);font-weight:900;font-size:14px;letter-spacing:.07em;text-transform:uppercase}
+.brand span i{font-style:normal;color:var(--blaze)}
+.brand small{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;font-weight:500;margin-top:1px}
+.brand a{border:0;display:flex;align-items:center;gap:9px;color:var(--bone)}
+
+.searchbox{padding:14px 16px;border-bottom:var(--edge)}
+.searchbox input{
+  width:100%;background:var(--ink);border:var(--edge);color:var(--bone);
+  font-family:var(--mono);font-size:12px;padding:8px 10px;
+}
+.searchbox input::placeholder{color:var(--dim)}
+.searchbox input:focus{outline:none;border-color:var(--blaze)}
+
+.nav{padding:16px 0 32px;flex:1}
+.nav h4{
+  font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--dim);margin:20px 20px 8px;
+}
+.nav a{
+  display:flex;align-items:baseline;gap:9px;
+  padding:6px 20px;border:0;color:var(--sage);
+  font-size:13.5px;line-height:1.4;
+  border-left:2px solid transparent;
+}
+.nav a em{font-family:var(--mono);font-size:10px;font-style:normal;color:var(--dim);flex:none;width:16px}
+.nav a:hover{color:var(--bone);background:var(--raise)}
+.nav a.on{color:var(--bone);background:var(--raise);border-left-color:var(--blaze)}
+.nav a.on em{color:var(--blaze)}
+
+/* ---- main ---- */
+.main{min-width:0;display:flex;flex-direction:column}
+.topbar{
+  display:none;align-items:center;gap:14px;
+  padding:12px 18px;border-bottom:var(--edge);
+  position:sticky;top:0;background:rgba(12,17,14,.9);backdrop-filter:blur(8px);z-index:90;
+}
+.burger{background:none;border:var(--edge);color:var(--bone);padding:7px 10px;font-family:var(--mono);font-size:12px;cursor:pointer}
+
+.page{
+  display:grid;grid-template-columns:minmax(0,1fr) var(--toc);
+  gap:56px;
+  padding:clamp(28px,4vw,60px) clamp(22px,4vw,64px) 96px;
+  max-width:1180px;
+}
+.doc{min-width:0;max-width:76ch}
+
+/* ---- typography inside a doc ---- */
+.crumbs{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:22px}
+.crumbs a{color:var(--dim);border:0}
+.crumbs a:hover{color:var(--blaze)}
+
+.doc h1{
+  font-family:var(--disp);font-weight:900;text-transform:uppercase;
+  font-size:clamp(30px,4.4vw,48px);line-height:1.02;letter-spacing:-.015em;
+  margin:14px 0 0;
+}
+.doc h1 i{font-style:normal;color:var(--blaze)}
+.doc .lede{font-size:17.5px;color:var(--sage);margin:16px 0 0;max-width:64ch}
+.doc .lede strong{color:var(--bone);font-weight:600}
+
+.doc h2{
+  font-family:var(--disp);font-weight:800;text-transform:uppercase;
+  font-size:22px;letter-spacing:.005em;
+  margin:56px 0 4px;padding-top:22px;border-top:var(--edge);
+  scroll-margin-top:80px;
+}
+.doc h3{font-family:var(--disp);font-weight:800;font-size:15.5px;text-transform:uppercase;letter-spacing:.03em;margin:30px 0 6px}
+.doc p{margin:14px 0}
+.doc ul,.doc ol{margin:14px 0;padding-left:20px}
+.doc li{margin:6px 0}
+.doc li::marker{color:var(--blaze)}
+.doc strong{color:var(--bone);font-weight:600}
+.doc code{font-family:var(--mono);font-size:.86em;color:var(--ir);background:rgba(166,196,174,.08);padding:1.5px 5px;border-radius:2px}
+.doc pre{
+  background:#070A08;border:var(--edge);border-left:2px solid var(--blaze);
+  padding:16px 18px;overflow-x:auto;margin:20px 0;
+  font-family:var(--mono);font-size:12.5px;line-height:1.65;color:var(--ir);
+}
+.doc pre code{background:none;padding:0;color:inherit}
+.doc blockquote{
+  margin:22px 0;padding:14px 18px;border:var(--edge);background:var(--moss);
+  color:var(--sage);font-size:14.5px;
+}
+.doc blockquote strong{color:var(--blaze)}
+
+.doc table{width:100%;border-collapse:collapse;margin:22px 0;font-size:14px}
+.doc th,.doc td{text-align:left;padding:10px 14px;border:var(--edge);vertical-align:top}
+.doc th{
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--dim);font-weight:600;background:var(--moss);
+}
+
+.doc hr{border:0;border-top:var(--edge);margin:44px 0}
+
+/* placeholder marker — put a real number in, then delete class="fill" */
+.fill{color:var(--blaze);border-bottom:2px dotted var(--blaze)}
+
+.note{
+  border:var(--edge);border-left:2px solid var(--ir);
+  background:var(--moss);padding:14px 18px;margin:22px 0;font-size:14.5px;color:var(--sage);
+}
+.note b{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ir);margin-bottom:6px}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border:var(--edge);margin:32px 0}
+.stats div{padding:16px;border-right:var(--edge)}
+.stats div:last-child{border-right:0}
+.stats dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--dim);margin-bottom:6px}
+.stats dd{margin:0;font-family:var(--disp);font-weight:800;font-size:22px}
+@media(max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}.stats div:nth-child(2n){border-right:0}}
+
+.flow{display:grid;gap:1px;background:var(--edge-c);border:var(--edge);margin:26px 0}
+.flow .step{background:var(--ink);padding:16px 18px;display:grid;grid-template-columns:78px 1fr;gap:18px;align-items:start}
+.flow .step b{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--blaze);padding-top:3px}
+.flow .step p{margin:0;font-size:14px;color:var(--sage)}
+.flow .step p strong{display:block;color:var(--bone);font-family:var(--disp);font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:.03em;margin-bottom:3px}
+.flow .step p strong a{color:var(--bone);border-bottom-color:rgba(233,227,213,.25)}
+.flow .step p strong a:hover{color:var(--blaze);border-bottom-color:var(--blaze)}
+@media(max-width:560px){.flow .step{grid-template-columns:1fr;gap:8px}}
+
+.pager{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--edge-c);border:var(--edge);margin-top:64px}
+.pager a{background:var(--ink);padding:18px 20px;border:0;color:var(--bone);display:block}
+.pager a:hover{background:var(--moss)}
+.pager a span{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
+.pager a.next{text-align:right}
+.pager a.empty{pointer-events:none}
+.pager strong{font-family:var(--disp);font-weight:800;font-size:15px;text-transform:uppercase}
+
+/* ---- right rail TOC ---- */
+.rail{position:sticky;top:32px;align-self:start;height:max-content}
+.rail h5{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin:0 0 12px;padding-bottom:10px;border-bottom:var(--edge)}
+.rail a{display:block;border:0;color:var(--sage);font-size:12.5px;line-height:1.45;padding:5px 0 5px 11px;border-left:1px solid var(--edge-c)}
+.rail a:hover{color:var(--bone)}
+.rail a.on{color:var(--blaze);border-left-color:var(--blaze)}
+.rail .empty{color:var(--dim);font-size:12px}
+
+/* ---- capture frame: real photo + model output overlaid ---- */
+.capture{margin:30px 0 0}
+.capture.tight{margin:24px 0 0}
+.frame{
+  position:relative;border:var(--edge);background:#070A08;
+  aspect-ratio:1920/1112;overflow:hidden;
+}
+.frame img{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  filter:saturate(.72) contrast(1.06) brightness(.84);
+}
+.frame::after{ /* vignette, so the overlay reads */
+  content:"";position:absolute;inset:0;pointer-events:none;z-index:2;
+  background:radial-gradient(125% 100% at 50% 45%,transparent 40%,rgba(4,7,5,.42) 78%,rgba(4,7,5,.72) 100%);
+}
+
+/* detection boxes — positioned by percentage over the real photo */
+.det{position:absolute;z-index:3}
+.det svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.det rect{
+  fill:none;stroke-width:2;vector-effect:non-scaling-stroke;
+  stroke-dasharray:600;stroke-dashoffset:600;
+  animation:draw 1s cubic-bezier(.6,0,.2,1) forwards;
+}
+.det.primary rect{stroke:var(--blaze);animation-delay:.35s}
+.det.secondary rect{stroke:var(--ir);stroke-dasharray:7 5;animation:draw2 .8s ease .9s forwards;stroke-dashoffset:0;opacity:0}
+@keyframes draw{to{stroke-dashoffset:0}}
+@keyframes draw2{to{opacity:1}}
+
+.det .tag{
+  position:absolute;bottom:100%;left:-1px;margin-bottom:5px;display:flex;white-space:nowrap;
+  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  opacity:0;animation:snap .3s ease-out forwards;
+}
+.det.primary .tag{animation-delay:1.2s}
+.det.secondary .tag{animation-delay:1.5s}
+.det.primary .tag b{background:var(--blaze);color:#0C110E;padding:3px 8px}
+.det.primary .tag em{background:rgba(12,17,14,.92);border:1px solid var(--blaze);border-left:0;color:var(--blaze);padding:3px 8px;font-style:normal}
+.det.secondary .tag b{background:var(--ir);color:#0C110E;padding:3px 8px}
+.det.secondary .tag em{background:rgba(12,17,14,.92);border:1px solid var(--ir);border-left:0;color:var(--ir);padding:3px 8px;font-style:normal}
+@keyframes snap{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* what BuckTrax derived, as opposed to what the camera burned in */
+.derived{
+  display:flex;flex-wrap:wrap;
+  border:var(--edge);border-top:0;
+  background:var(--moss);
+  font-family:var(--mono);font-size:10px;font-weight:500;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ir);
+}
+.derived i{font-style:normal;padding:8px 13px;border-right:var(--edge)}
+.derived i u{text-decoration:none;color:var(--dim);display:block;font-size:9px;letter-spacing:.14em;margin-bottom:1px}
+.derived i:last-child{border-right:0;margin-left:auto;color:var(--blaze)}
+.capture figcaption{
+  margin:12px 0 0;font-size:13.5px;color:var(--sage);line-height:1.55;
+}
+.capture figcaption b{color:var(--bone);font-weight:600}
+@media(max-width:700px){
+  .derived i:nth-child(n+4){display:none}
+  .det .tag{font-size:8.5px;letter-spacing:.06em}
+}
+
+/* ---- search results ---- */
+.results{border-top:var(--edge);padding:10px 0}
+.results a{display:block;border:0;padding:8px 20px;color:var(--sage);font-size:12.5px;line-height:1.45}
+.results a:hover{background:var(--raise);color:var(--bone)}
+.results a b{display:block;color:var(--bone);font-family:var(--disp);font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px}
+.results .none{padding:8px 20px;font-family:var(--mono);font-size:11px;color:var(--dim);margin:0}
+
+/* ---- responsive ---- */
+@media(max-width:1080px){ .page{grid-template-columns:minmax(0,1fr)} .rail{display:none} }
+@media(max-width:860px){
+  .shell{grid-template-columns:1fr}
+  .side{position:fixed;left:0;top:0;width:min(300px,86vw);transform:translateX(-100%);transition:transform .22s ease}
+  .side.open{transform:none}
+  .topbar{display:flex}
+  .scrim{position:fixed;inset:0;background:rgba(6,9,7,.7);z-index:95;display:none}
+  .scrim.on{display:block}
+}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  .bbox rect{stroke-dashoffset:0}.tag{opacity:1}html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="side" id="side">
+    <div class="brand">
+      <a href="#/overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 21c-2.4 0-4-1.7-4-4 0-1.6.7-2.6.7-4.2 0-1.2-.9-1.8-.9-3.1"/>
+          <path d="M12 21c2.4 0 4-1.7 4-4 0-1.6-.7-2.6-.7-4.2 0-1.2.9-1.8.9-3.1"/>
+          <path d="M7.8 9.7C6.9 8.4 5.3 8.2 4.2 6.9 3.4 6 3.3 4.6 3.5 3.4" stroke="#E4571F"/>
+          <path d="M16.2 9.7c.9-1.3 2.5-1.5 3.6-2.8.8-.9.9-2.3.7-3.5" stroke="#E4571F"/>
+          <path d="M6.4 6.5C5.5 6.1 4.6 5.4 4 4.4M17.6 6.5c.9-.4 1.8-1.1 2.4-2.1" stroke="#E4571F"/>
+          <circle cx="10.2" cy="15.4" r=".9" fill="currentColor" stroke="none"/>
+          <circle cx="13.8" cy="15.4" r=".9" fill="currentColor" stroke="none"/>
+        </svg>
+        <span>Buck<i>Trax</i><small>Engineering wiki</small></span>
+      </a>
+    </div>
+
+    <div class="searchbox">
+      <input id="q" type="search" placeholder="Search  ( / )" autocomplete="off" aria-label="Search the wiki">
+    </div>
+    <div class="results" id="results" hidden></div>
+
+    <nav class="nav" id="nav"></nav>
+  </aside>
+
+  <div class="scrim" id="scrim"></div>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="burger" id="burger" aria-label="Open navigation">☰ Menu</button>
+      <span class="osd">Buck<b>Trax</b></span>
+    </div>
+
+    <div class="page">
+      <article class="doc" id="doc"></article>
+      <aside class="rail">
+        <h5>On this page</h5>
+        <div id="toc"></div>
+      </aside>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ============================================================
+   CONTENT
+   To add a page: append an object here. Nav, search, routing,
+   table of contents and prev/next all update automatically.
+   ============================================================ */
+const PAGES = [
+
+{
+  id:"overview", group:"Start here", title:"Overview",
+  eyebrow:"Project · Bad Axe, Michigan",
+  h1:'Buck<i>Trax</i>',
+  lede:'A self-hosted <strong>trail camera intelligence platform</strong>. Photos land from <span class="fill">[N]</span> cameras across two Michigan properties, get classified by a vision-language model on a GPU, and surface as target buck profiles, movement patterns and hunt conditions in one dashboard.',
+  body:`
+<figure class="capture">
+  <div class="frame">
+    <img src="capture.jpg" alt="Cuddeback trail camera photo: a mature whitetail buck in the foreground beside a pond, with a second, smaller buck visible in the background at right.">
+
+    <div class="det primary" style="left:0;top:36.4%;width:51.3%;height:58.5%">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="1" y="1" width="98" height="98"/></svg>
+      <div class="tag"><b>Deer · buck</b><em>mature · 0.94</em></div>
+    </div>
+
+    <div class="det secondary" style="left:74%;top:74.2%;width:22.4%;height:19.8%">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="1" y="1" width="98" height="98"/></svg>
+      <div class="tag"><b>Deer · buck</b><em>0.81</em></div>
+    </div>
+  </div>
+
+  <div class="derived">
+    <i><u>Property</u>AP Farms</i>
+    <i><u>Camera</u>Pond 005 · Cuddeback</i>
+    <i><u>Captured</u>2025-10-28 18:10</i>
+    <i><u>Detected</u>2 deer · 2 buck · 0 doe</i>
+    <i><u>Record</u>Buck</i>
+  </div>
+
+  <figcaption>
+    Real capture, real model output. The camera burns in the strip along the bottom — <b>everything above it is BuckTrax.</b>
+    The model reads <b>every animal in frame</b> and labels each one, then the photo is filed under a single primary subject
+    so that one trigger counts as one sighting. Two bucks seen; one <code>buck</code> record written.
+    Skip that aggregation step and every count in the product silently doubles. It did, once — <a href="#/decisions">DEC-03</a>.
+  </figcaption>
+</figure>
+
+<dl class="stats">
+  <div><dt>Photos classified</dt><dd class="fill">[12,400]</dd></div>
+  <div><dt>Cameras · properties</dt><dd><span class="fill">[6]</span> · 2</dd></div>
+  <div><dt>Inference cost</dt><dd>$0<span style="font-size:.55em;color:var(--dim);letter-spacing:.1em"> /MO</span></dd></div>
+  <div><dt>Auto-classified</dt><dd class="fill">[~85%]</dd></div>
+</dl>
+
+<h2 id="problem">The problem</h2>
+<p>Trail cameras are sold by brand, and each brand ships its own walled-garden app. Run a Cuddeback and a Spypoint on the same property and you have two logins, two photo feeds, two notification systems, and <strong>no way to ask a question that spans both</strong> — like "which cameras has this particular buck hit, at what hour, and under what wind?"</p>
+<p>The apps also give you raw photos. Thousands of them, most of which are a squirrel or a branch moving. The signal is buried.</p>
+
+<h2 id="what">What BuckTrax does</h2>
+<ul>
+  <li><strong>Unifies the feeds.</strong> Scrapers pull from every vendor portal into one database with a common schema. One place, all cameras.</li>
+  <li><strong>Reads every photo.</strong> A vision-language model labels species, sex and count, so the noise drops out and the deer surface.</li>
+  <li><strong>Turns sightings into intel.</strong> Target buck profiles, daylight-activity ribbons, and a hunt-conditions readout for the property's exact coordinates.</li>
+  <li><strong>Works from a tree stand.</strong> Mobile triage over VPN, because that's where you are when you need it.</li>
+</ul>
+
+<h2 id="read">How to read this wiki</h2>
+<div class="flow">
+  <div class="step"><b>Build</b><p><strong><a href="#/architecture">Architecture</a></strong>How the five stages fit together, and why it's deliberately a monolith.</p></div>
+  <div class="step"><b>Data in</b><p><strong><a href="#/acquisition">Acquisition</a> · <a href="#/classification">Classification</a></strong>Getting photos out of portals with no API, and labels out of a 4B-parameter model for free.</p></div>
+  <div class="step"><b>Data out</b><p><strong><a href="#/data-model">Data model</a> · <a href="#/frontend">Frontend</a></strong>The two schema rules that keep the numbers honest, and the screens built on them.</p></div>
+  <div class="step"><b>Keep it up</b><p><strong><a href="#/operations">Operations</a></strong>The runbook: scheduling, SQLite under concurrent load, health guards, known weaknesses.</p></div>
+  <div class="step"><b>Why</b><p><strong><a href="#/decisions">Decision log</a></strong>The four calls that mattered, written down while they were fresh. <em>Start here if you only read one page.</em></p></div>
+</div>
+
+<div class="note">
+  <b>Status</b>
+  Running in production on my own properties since <span class="fill">[2025]</span>. Built and operated solo. <span class="fill">[Repo link]</span>
+</div>
+`
+},
+
+{
+  id:"architecture", group:"System",
+  title:"Architecture", eyebrow:"System · end to end",
+  h1:"Architecture",
+  lede:'Five stages. Cameras I don\'t control, portals I don\'t control, and then everything downstream is mine.',
+  body:`
+<h2 id="stages">The pipeline</h2>
+<div class="flow">
+  <div class="step"><b>01 · Capture</b><p><strong>Cameras</strong>Cuddeback and Spypoint units in the field. Motion-triggered, cellular upload to each vendor's cloud. The only part I have no control over.</p></div>
+  <div class="step"><b>02 · Acquire</b><p><strong>Scrapers</strong>Headless Playwright sessions authenticate to each portal, page through new photos, and download them with their metadata, on a schedule. See <a href="#/acquisition">Acquisition</a>.</p></div>
+  <div class="step"><b>03 · Classify</b><p><strong>Vision model</strong>Qwen3-VL-4B on a Kaggle T4. An orchestrator generates a notebook, pushes it, polls, and pulls results back. See <a href="#/classification">Classification</a>.</p></div>
+  <div class="step"><b>04 · Store</b><p><strong>API + database</strong>FastAPI over SQLite. Guarded ingest, scoped migrations, one detection per image. See <a href="#/data-model">Data model</a>.</p></div>
+  <div class="step"><b>05 · Serve</b><p><strong>Dashboard</strong>Vanilla-JS app served as static files off the same FastAPI process. Reachable from anywhere over Tailscale. See <a href="#/frontend">Frontend</a>.</p></div>
+</div>
+
+<h2 id="topology">Where it runs</h2>
+<pre><code>┌─ FIELD ──────────┐   ┌─ VENDOR CLOUD ─┐   ┌─ WINDOWS LAPTOP ─────────────┐
+│                  │   │                │   │                              │
+│  Cuddeback  ─────┼──▶│  Cuddeback     │◀──┼── Playwright scraper         │
+│  Spypoint   ─────┼──▶│  Spypoint      │◀──┼── Playwright scraper         │
+│                  │   │                │   │            │                 │
+└──────────────────┘   └────────────────┘   │            ▼                 │
+                                            │       photos/ + SQLite       │
+       ┌─ KAGGLE ────────┐                  │            │                 │
+       │  T4 GPU         │◀── push notebook─┼────────────┤                 │
+       │  Qwen3-VL-4B    │─── pull results ─┼───────────▶│                 │
+       └─────────────────┘                  │            ▼                 │
+                                            │   FastAPI :8000 ── static/   │
+                                            └──────────────┬───────────────┘
+                                                           │ Tailscale
+                                                   ┌───────▼────────┐
+                                                   │  Phone / other │
+                                                   └────────────────┘</code></pre>
+
+<h2 id="monolith">Why it's a monolith</h2>
+<p>The backend is a single <code>api.py</code>, roughly 2,000 lines. That's a choice, not neglect.</p>
+<ul>
+  <li><strong>One operator.</strong> Service boundaries buy you independent deploys and independent teams. I have neither.</li>
+  <li><strong>One writer.</strong> SQLite is single-writer by design. Splitting into services that all want to write would recreate the exact contention problem I already had to solve once — see <a href="#/decisions">DEC-01</a>.</li>
+  <li><strong>Cheap to move.</strong> The whole system is a directory and a file. Migrating to a VPS is <code>rsync</code> plus a service unit, not a Kubernetes conversation.</li>
+</ul>
+<p>The split that <em>does</em> exist is the one that matters: <strong>heavy compute is remote.</strong> Scraping and GPU inference are batch jobs with a completely different resource profile from serving a dashboard, so they run out-of-process and hand results back through the database.</p>
+
+<h2 id="tradeoffs">What I gave up</h2>
+<table>
+  <tr><th>Choice</th><th>Cost</th><th>Why it's acceptable</th></tr>
+  <tr><td>SQLite, not Postgres</td><td>Single writer; contention under load</td><td>Read-heavy workload, one user. Litestream gives durable backup with no server to run.</td></tr>
+  <tr><td>Monolithic <code>api.py</code></td><td>Gets unwieldy past ~2k lines</td><td>Splitting by router is a mechanical refactor whenever it starts to hurt.</td></tr>
+  <tr><td>Vanilla JS, no framework</td><td>Manual DOM work</td><td>Zero build step, zero dependency rot. A shared <code>nav.js</code> shell gave 90% of an SPA's benefit for 5% of the work.</td></tr>
+  <tr><td>Runs on a laptop</td><td>Single point of failure; it has to stay on</td><td>Known, and scheduled for removal — see <a href="#/roadmap">Roadmap</a>.</td></tr>
+</table>
+`
+},
+
+{
+  id:"acquisition", group:"System",
+  title:"Data acquisition", eyebrow:"Stage 02 · getting photos out",
+  h1:"Data acquisition",
+  lede:'No camera vendor offers a public API. Every photo in this system was taken out of a web portal that did not want to give it up.',
+  body:`
+<h2 id="approach">The approach</h2>
+<p>Each vendor gets its own <strong>Playwright</strong> scraper: headless browser, real login, page through the photo grid, download anything whose ID isn't already in the database.</p>
+<p>The alternative — reverse-engineering the portals' private JSON endpoints — runs faster but is far more brittle. Those endpoints change without notice and without a UI to tell you they changed. Driving the actual interface means the scraper breaks in the same visible way a human would notice.</p>
+
+<h2 id="supported">Supported cameras</h2>
+<table>
+  <tr><th>Vendor</th><th>Method</th><th>Status</th></tr>
+  <tr><td>Cuddeback</td><td>Playwright, portal login</td><td>Live</td></tr>
+  <tr><td>Spypoint</td><td>Playwright, portal login</td><td>Live</td></tr>
+  <tr><td>Moultrie</td><td>—</td><td>Planned</td></tr>
+  <tr><td>Tactacam</td><td>—</td><td>Planned</td></tr>
+</table>
+<p>Adding a vendor means writing one scraper that emits the common photo record. Nothing downstream changes — that's the payoff for normalizing at the boundary.</p>
+
+<h2 id="normal">Normalizing at the boundary</h2>
+<p>Every scraper, regardless of vendor, emits the same shape:</p>
+<pre><code>{
+  "vendor":          "cuddeback",
+  "vendor_photo_id": "…",          # makes re-runs idempotent
+  "camera_id":       4,
+  "property_id":     1,
+  "captured_at":     "2026-07-13T05:41:00-04:00",
+  "temp_f":          41,
+  "image_path":      "photos/2026/07/13/…jpg"
+}</code></pre>
+<p>Vendor quirks — timezone handling, temperature units, ID formats — are absorbed here and never leak into the database. <strong>One brand's mess is not the whole system's mess.</strong></p>
+
+<h2 id="idempotent">Re-runs are safe</h2>
+<p>The scraper is idempotent on <code>(vendor, vendor_photo_id)</code>. A run that dies halfway can be re-run without creating duplicates — which matters, because scrapers <em>do</em> die halfway. Sessions expire, portals rate-limit, wifi drops.</p>
+
+<h2 id="scheduling">Scheduling</h2>
+<p>Runs under <strong>Windows Task Scheduler</strong>. Three gotchas cost me an evening each and are written up on <a href="#/operations">Operations</a>: full Python path, explicit Start-In directory, forced UTF-8. Every one of them fails <em>silently</em> — the task reports success and does nothing.</p>
+
+<div class="note">
+  <b>Hard-won</b>
+  A long scraper run holding a write transaction is what used to take the API down every night. The fix is <a href="#/decisions">DEC-01</a> — batched writes with a micro-pause between commits, so readers get a window.
+</div>
+`
+},
+
+{
+  id:"classification", group:"System",
+  title:"Classification", eyebrow:"Stage 03 · vision model",
+  h1:"Classification",
+  lede:'A 4-billion-parameter vision-language model reads every photo. It runs on a T4 GPU and costs <strong>nothing</strong>.',
+  body:`
+<h2 id="model">The model</h2>
+<p><strong>Qwen3-VL-4B.</strong> An open-weights vision-language model — it takes an image and a prompt and reasons in text, rather than emitting bare bounding boxes.</p>
+<p>That matters here. What I need isn't "there is an animal in this photo" — a detector solves that. It's <strong>"is this a mature buck, and is it the same mature buck as last Tuesday"</strong>: a judgment about antlers, body posture and view angle. A VLM can be told the rules of that judgment in plain language, and — critically — can tell me when it <em>can't</em> make the call.</p>
+
+<h3>What it replaced</h3>
+<table>
+  <tr><th>Approach</th><th>Why it lost</th></tr>
+  <tr><td>MegaDetector + ResNet</td><td>Excellent at "animal / not animal." No concept of sex, age class or antlers. Two models to maintain for less answer.</td></tr>
+  <tr><td>Hosted vision API</td><td>Worked well. Billed per image — so cost scaled with exactly the variable I wanted to grow.</td></tr>
+  <tr><td><strong>Qwen3-VL-4B on Kaggle</strong></td><td><strong>Reasons in language, runs on free GPU, costs $0.</strong></td></tr>
+</table>
+
+<h2 id="kaggle">Running it for free</h2>
+<p>Kaggle gives away roughly 30 GPU-hours a week. <code>run_pipeline.py</code> turns that into an inference service:</p>
+<div class="flow">
+  <div class="step"><b>1</b><p><strong>Preflight</strong>Verify the local notebook contains required markers. Refuses to push otherwise — added after a stale local copy shipped once and quietly did nothing.</p></div>
+  <div class="step"><b>2</b><p><strong>Push</strong><code>kaggle kernels push</code>, accelerator pinned to <code>NvidiaTeslaT4</code>.</p></div>
+  <div class="step"><b>3</b><p><strong>Poll</strong>Wait on kernel status until the run completes or fails.</p></div>
+  <div class="step"><b>4</b><p><strong>Pull</strong>Download the output JSON.</p></div>
+  <div class="step"><b>5</b><p><strong>Ingest</strong>Aggregate to one detection per image, run the health guard, write to SQLite.</p></div>
+</div>
+
+<blockquote><strong>The gotcha that cost hours:</strong> the accelerator string is case-sensitive. <code>NvidiaTeslaT4</code> works. <code>nvidiateslat4</code> does not error — Kaggle silently hands you a CPU, the run takes forever, and nothing tells you why.</blockquote>
+
+<h2 id="onerow">Detect everything, file one record</h2>
+<p>The model reads the whole frame and labels <strong>every animal in it</strong>. What lands in the database is a single row describing the photo's primary subject.</p>
+<p>Those are two different jobs, and conflating them corrupted the database once.</p>
+
+<figure class="capture tight">
+  <div class="frame">
+    <img src="capture.jpg" alt="Trail camera photo containing two bucks — a mature one in the foreground and a second across the pond.">
+    <div class="det primary" style="left:0;top:36.4%;width:51.3%;height:58.5%">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="1" y="1" width="98" height="98"/></svg>
+      <div class="tag"><b>Deer · buck</b><em>mature · 0.94</em></div>
+    </div>
+    <div class="det secondary" style="left:74%;top:74.2%;width:22.4%;height:19.8%">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="1" y="1" width="98" height="98"/></svg>
+      <div class="tag"><b>Deer · buck</b><em>0.81</em></div>
+    </div>
+  </div>
+  <figcaption><b>Two bucks, one photo.</b> The one across the pond is small, backlit, half-obscured and 40 yards out — and the model still gets it. That's the capability. The question is what to <em>store</em>.</figcaption>
+</figure>
+
+<h3>What the model returns</h3>
+<pre><code>{
+  "photo_id": 8814,
+  "animals": [
+    { "species": "deer", "sex": "buck", "age": "mature", "conf": 0.94 },
+    { "species": "deer", "sex": "buck", "age": "unknown", "conf": 0.81 }
+  ]
+}</code></pre>
+
+<h3>What ingest writes</h3>
+<pre><code>detections
+  photo_id  species  sex   count  confidence
+  8814      deer     buck  2      0.94        ← one row</code></pre>
+
+<p>Ingest picks the <strong>primary subject</strong> by a fixed priority and keeps the animal count alongside it:</p>
+<pre><code>buck  >  doe  >  fawn  >  highest-confidence other</code></pre>
+
+<p>Why it has to work this way: a trail camera trigger is <strong>one event</strong>. If a photo with a buck, two does and a fawn writes four rows, then that single trigger has told the system it saw four separate deer — sighting counts inflate, daylight-activity ribbons spike, and a target buck's profile quietly absorbs the doe photos standing next to him.</p>
+<p>The detection detail isn't thrown away; it's just not what the sighting count is built on. One trigger, one sighting, one primary subject. Full story: <a href="#/decisions">DEC-03</a>.</p>
+
+<h2 id="unknown">Uncertainty is a first-class output</h2>
+<p>A deer photographed from directly behind cannot be sexed. Not by the model, not by me, not by anyone.</p>
+<p>The model's instinct is to guess "doe" — it's the base rate, so it's right most of the time. <strong>That is the worst possible behaviour for this system.</strong> The entire product is "which buck is on which camera." A confident wrong label doesn't just miss; it poisons the profile you're planning a hunt around.</p>
+<p>So the prompt makes "I can't tell" a valid, expected answer:</p>
+<table>
+  <tr><th>Evidence</th><th>Species</th><th>Sex</th><th>Routes to</th></tr>
+  <tr><td>Antlers visible</td><td><code>deer</code></td><td><code>buck</code></td><td>Auto-ingest</td></tr>
+  <tr><td>Clear side/front view, no antlers, adult</td><td><code>deer</code></td><td><code>doe</code></td><td>Auto-ingest</td></tr>
+  <tr><td>Rear-only, obscured, or ambiguous</td><td><code>deer</code></td><td><code>unknown</code></td><td><strong>Human triage</strong></td></tr>
+</table>
+<p>Anything <code>unknown</code> routes to the <a href="#/frontend">mobile swipe screen</a>, where it takes about a second to resolve. Automation where the model is strong; a human where it isn't. See <a href="#/decisions">DEC-04</a>.</p>
+
+<h2 id="guard">The health guard</h2>
+<p>A bad model run — wrong prompt, truncated output, OOM mid-batch — used to write its garbage straight into the table. Now ingest counts errors first and <strong>aborts the entire run if 50% or more of records failed.</strong> A bad batch fails loudly instead of poisoning the dataset quietly.</p>
+`
+},
+
+{
+  id:"data-model", group:"System",
+  title:"Data model", eyebrow:"Stage 04 · schema",
+  h1:"Data model",
+  lede:'SQLite. Five tables that matter, and two rules that keep the numbers trustworthy.',
+  body:`
+<h2 id="tables">Core tables</h2>
+<table>
+  <tr><th>Table</th><th>Holds</th><th>Notes</th></tr>
+  <tr><td><code>properties</code></td><td>AP Farms, Cyle's Back 15</td><td>Coordinates drive the weather lookup.</td></tr>
+  <tr><td><code>cameras</code></td><td>One row per unit</td><td>Vendor, lat/lon, placement notes. Rendered on the Leaflet map.</td></tr>
+  <tr><td><code>photos</code></td><td>One row per capture</td><td>Unique on <code>(vendor, vendor_photo_id)</code>, so scraper re-runs are idempotent.</td></tr>
+  <tr><td><code>detections</code></td><td><strong>One row per photo</strong></td><td>Species, sex, count, confidence. Never more than one per photo — see below.</td></tr>
+  <tr><td><code>bucks</code></td><td>Named target animals</td><td>Joined to detections to build the profile cards.</td></tr>
+</table>
+
+<h2 id="rules">The two rules</h2>
+
+<h3>1 · One detection per image</h3>
+<p>The model may see four animals. The database records one — the primary subject, by priority <code>buck &gt; doe &gt; fawn &gt; highest-confidence other</code>. Aggregation happens in the ingest layer, before insert.</p>
+<p>Break this and every count in the product silently inflates. It happened. See <a href="#/decisions">DEC-03</a>.</p>
+
+<h3>2 · Never infer sex without evidence</h3>
+<p>Rear-only or ambiguous deer are stored as species <code>deer</code>, sex <code>unknown</code>. There is no "probably a doe" state. Uncertainty is recorded as uncertainty, and resolved by a human.</p>
+
+<h2 id="migrations">Migrations are scoped</h2>
+<p>Migrations are numbered and live in <code>migrations/</code>. The dedupe migration that cleaned up the one-row-per-crop bug is the house style:</p>
+<pre><code># 002_dedupe_detections.py
+#
+# Scoped by created_at — touches only rows written by the
+# buggy pipeline version. Historical data is not rewritten.</code></pre>
+<p><strong>A migration should touch the smallest set of rows that fixes the problem.</strong> A blanket <code>DELETE</code> would also have worked, and would also have quietly destroyed correct historical records. Scoping by <code>created_at</code> made the change auditable and reversible.</p>
+
+<h2 id="joins">The JOIN that unblocked everything</h2>
+<p>For a while the homepage target-buck cards came up empty and nothing explained why. The detections were there; the buck metadata wasn't joined in. A missing JOIN.</p>
+<p>The lesson wasn't about SQL. It was about <strong>sequencing</strong> — I'd started building the hero cards and movement predictions <em>on top of</em> a data layer that couldn't serve them. Both features were dead on arrival until the foundational query was right.</p>
+<blockquote><strong>Fix data problems before building the features that depend on them.</strong> This sounds obvious. It is not obvious when you're excited about the feature.</blockquote>
+`
+},
+
+{
+  id:"frontend", group:"System",
+  title:"Frontend", eyebrow:"Stage 05 · the screens",
+  h1:"Frontend",
+  lede:'Vanilla JS, no framework, no build step. Every screen answers some part of one question: <strong>which stand do I sit tonight?</strong>',
+  body:`
+<h2 id="pages">The screens</h2>
+<table>
+  <tr><th>Screen</th><th>Job</th></tr>
+  <tr><td><strong>Overview</strong></td><td>Hunt-conditions hero — wind, pressure, temperature and moon for the property's exact coordinates via Open-Meteo — beside a daylight-activity ribbon showing when deer are actually moving on camera.</td></tr>
+  <tr><td><strong>Target bucks</strong></td><td>A hero card per mature buck: which cameras he hits, at what hours, under what conditions, and a plan for tonight given the forecast.</td></tr>
+  <tr><td><strong>Triage</strong></td><td>Mobile swipe screen. Everything the model wasn't sure about. Confirm or correct in about a second.</td></tr>
+  <tr><td><strong>Map</strong></td><td>Camera positions on Leaflet with ESRI topo and hillshade overlays — terrain, funnels and pinch points, not pins on a road map.</td></tr>
+  <tr><td><strong>Gallery / Import</strong></td><td>Browse everything; manually pull a camera on demand.</td></tr>
+</table>
+
+<h2 id="shell">Shared shell, not an SPA</h2>
+<p>The pages started as separate HTML files with duplicated navigation. The obvious fix is "refactor into an SPA." I didn't.</p>
+<p>Instead: <code>nav.js</code> — a shared shell that injects navigation and auth state into every page. Same visual result, one afternoon instead of a week, no router and no build step to maintain.</p>
+<blockquote><strong>The 90% solution shipped the same day.</strong> The SPA refactor is still available if the app ever grows enough to need it. So far it hasn't.</blockquote>
+
+<h2 id="field">Designed for the field</h2>
+<p>The triage screen exists because of <em>where it gets used</em>: cold, one-handed, low light, gloves, spotty signal, sitting in a tree.</p>
+<ul>
+  <li><strong>Swipe, not tap-and-confirm.</strong> Big targets, one thumb, no precision required.</li>
+  <li><strong>Undo is always visible.</strong> Pulled out of the flex flow after it drifted off-centre and became unhittable.</li>
+  <li><strong>Auth persists.</strong> Token in <code>localStorage</code> — you cannot ask someone to type a password with cold hands.</li>
+  <li><strong><code>object-fit: contain</code>, not <code>cover</code>.</strong> A cropped photo hides the antlers. The antlers are the entire reason you're looking at it.</li>
+  <li><strong>"Other" opens a bottom sheet</strong> with the real species list, instead of a placeholder button that did nothing.</li>
+</ul>
+<p>Each of those is a small bug. Together they're the difference between a screen you use and a screen you abandon.</p>
+
+<h2 id="access">Access</h2>
+<p>The server runs on a laptop on a home network. Rather than expose a port to the internet, the whole thing sits behind <strong>Tailscale</strong> — the phone joins the same private network and reaches the dashboard as though it were local. No public surface, no reverse proxy, no certificates.</p>
+`
+},
+
+{
+  id:"operations", group:"Running it",
+  title:"Operations", eyebrow:"Runbook · keeping it alive",
+  h1:"Operations",
+  lede:'The interesting engineering was never the model. It was keeping a single-writer database, a scraper, a GPU job and a phone from stepping on each other.',
+  body:`
+<h2 id="sqlite">SQLite under concurrent load</h2>
+<p>SQLite has one writer. A long scraper run holding a write transaction will block the API's readers — and past the default timeout those reads don't queue, they fail.</p>
+<p><strong>The configuration that fixed it:</strong></p>
+<pre><code>PRAGMA busy_timeout = 30000;   -- wait 30s for a lock, don't fail instantly
+PRAGMA synchronous  = NORMAL;  -- fsync less aggressively; safe under WAL</code></pre>
+<p><strong>And the behavioural change that mattered more:</strong> the scraper no longer writes in one long transaction. It commits in batches with a micro-pause between them, which hands the writer lock back and gives readers a window.</p>
+<p>Behind both: an auto-restart wrapper, so if something does still take the process down, it comes back on its own. Full story on <a href="#/decisions">DEC-01</a>.</p>
+
+<h2 id="scheduler">Windows Task Scheduler</h2>
+<p>Auto-import runs as a scheduled task. Three failure modes — all of which report <em>success</em> and do nothing:</p>
+<table>
+  <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+  <tr><td>Task "completes" instantly, no output</td><td>Bare <code>python</code> isn't on the task's PATH</td><td>Use the full executable path</td></tr>
+  <tr><td>Imports fail, relative paths break</td><td>Task runs from <code>C:\\Windows\\System32</code></td><td>Set <strong>Start in</strong> to the repo directory explicitly</td></tr>
+  <tr><td>Dies on the first non-ASCII character</td><td>Windows console defaults to cp1252</td><td><code>PYTHONUTF8=1</code> + <code>sys.stdout.reconfigure(encoding='utf-8')</code></td></tr>
+</table>
+<blockquote><strong>A scheduled task that fails silently is worse than one that crashes.</strong> Every one of these was found by noticing that data had stopped arriving — not by an alert. That's a gap, and it's on the <a href="#/roadmap">roadmap</a>.</blockquote>
+
+<h2 id="guards">Guards</h2>
+<ul>
+  <li><strong>Notebook preflight.</strong> Refuses to push a Kaggle notebook missing required markers. Added after a stale local copy shipped and ran to completion doing nothing useful.</li>
+  <li><strong>Ingest health guard.</strong> Aborts the run if ≥50% of records errored. A bad model output can no longer poison the table.</li>
+  <li><strong>Scoped migrations.</strong> Constrained by <code>created_at</code>, so a fix can't rewrite history.</li>
+</ul>
+<p>The pattern in all three: <strong>make the failure loud and early, at the boundary, before it reaches the database.</strong> Every one of these guards exists because the corresponding failure already happened once, silently.</p>
+
+<h2 id="known">Known weaknesses</h2>
+<table>
+  <tr><th>Weakness</th><th>Risk</th><th>Plan</th></tr>
+  <tr><td>Runs on a laptop that must stay on</td><td>Single point of failure</td><td>VPS migration — see <a href="#/roadmap">Roadmap</a></td></tr>
+  <tr><td>No alerting</td><td>Silent stalls get found by noticing missing data</td><td>Heartbeat check on last successful import</td></tr>
+  <tr><td>Photos on local disk only</td><td>Disk failure loses the archive</td><td>Cloudflare R2, plus Litestream for the DB</td></tr>
+  <tr><td>Kaggle quota is finite</td><td>~30 GPU-hrs/week ceiling</td><td>Fine at current volume; would need paid GPU at 10×</td></tr>
+</table>
+`
+},
+
+{
+  id:"decisions", group:"Running it",
+  title:"Decision log", eyebrow:"Four calls that mattered",
+  h1:"Decision log",
+  lede:'Written down while they were still fresh. If you only read one page of this wiki, read this one.',
+  body:`
+<h2 id="dec01">DEC-01 · The server died every night for a week</h2>
+<p class="osd">Reliability · <b>resolved</b></p>
+<h3>Problem</h3>
+<p>The API fell over overnight, repeatedly, always during the scheduled import window. The logs showed database errors, so the working theory was "a crash" — and I spent real time hardening the crash path.</p>
+<p>It wasn't a crash. It was <strong>contention</strong>. The Playwright scraper held a long write transaction against SQLite; the API's reads blocked, exceeded the default lock timeout, and failed. Enough failures and the process went down.</p>
+<h3>Fix</h3>
+<ul>
+  <li><code>busy_timeout=30000</code> — wait for the lock instead of failing instantly.</li>
+  <li><code>synchronous=NORMAL</code> — stop fsyncing on every write.</li>
+  <li><strong>Batch the scraper's writes</strong>, with a micro-pause between commits so readers get a window.</li>
+  <li>Auto-restart supervisor — as a backstop, not as the fix.</li>
+</ul>
+<h3>Result</h3>
+<p>No lock-related crash since.</p>
+<blockquote><strong>The lesson: I was treating a concurrency problem as a crash problem.</strong> Every hour spent on the restart wrapper was an hour not spent on the actual bug. The symptom told me where it hurt — not what was wrong.</blockquote>
+
+<hr>
+
+<h2 id="dec02">DEC-02 · Running a 4B vision model for nothing</h2>
+<p class="osd">Cost · <b>resolved</b></p>
+<h3>Problem</h3>
+<p>Every photo needs a vision-model pass, and the system ingests thousands. A hosted vision API bills per image — meaning <strong>cost scaled with exactly the variable I wanted to grow.</strong> More cameras, more photos, more money. Local CPU inference was free but far too slow to keep up with the cameras.</p>
+<h3>Fix</h3>
+<p>Built <code>run_pipeline.py</code>: an orchestrator that generates the inference notebook, pushes it to a free Kaggle T4 via the CLI, polls the run, and pulls results back for ingest. Kaggle gives away ~30 GPU-hours a week.</p>
+<h3>Result</h3>
+<p><strong>$0/month of GPU inference on real Qwen3-VL-4B reasoning</strong>, with headroom to add cameras without adding cost.</p>
+<blockquote><strong>Gotcha:</strong> the accelerator string is case-sensitive — <code>NvidiaTeslaT4</code>. Get the casing wrong and Kaggle throws no error. It silently gives you a CPU, and you spend the afternoon wondering why a 20-minute job is still running.</blockquote>
+
+<hr>
+
+<h2 id="dec03">DEC-03 · A quiet spec violation corrupted every count</h2>
+<p class="osd">Data integrity · <b>resolved</b></p>
+<h3>Problem</h3>
+<p>The pipeline wrote <strong>one row per detected crop</strong>. A single photo containing a buck, a doe and a fawn produced three conflicting detection records.</p>
+<p>Nothing errored. No exception, no failed run, no red anything. But sighting counts inflated, and target-buck profiles quietly absorbed doe photos — meaning the intel I was <em>hunting on</em> was wrong.</p>
+<p>The spec had said one detection per image from the beginning. The implementation had drifted. I caught it by looking at the numbers and finding them implausible.</p>
+<h3>Fix</h3>
+<ul>
+  <li>Enforce aggregation to a primary subject before insert: <code>buck &gt; doe &gt; fawn &gt; highest-confidence other</code>.</li>
+  <li>Write <code>002_dedupe_detections.py</code>, <strong>scoped by <code>created_at</code></strong>, so it cleans up the bad rows without rewriting correct history.</li>
+  <li>Add an <strong>ingest health guard</strong> that aborts the run if ≥50% of records errored, so a bad model output can't do this again.</li>
+</ul>
+<h3>Result</h3>
+<p>Counts are trustworthy again.</p>
+<blockquote><strong>Silent data corruption is the most expensive kind of bug, because the system keeps confidently serving you wrong answers.</strong> The health guard exists to convert that class of failure from silent to loud.</blockquote>
+
+<hr>
+
+<h2 id="dec04">DEC-04 · "I don't know" is a valid answer</h2>
+<p class="osd">Model design · <b>resolved</b></p>
+<h3>Problem</h3>
+<p>Shown a deer from directly behind, the model would confidently answer "doe." It's the base rate, so it's right most of the time — and it is the <strong>worst possible behaviour</strong> for this product.</p>
+<p>The entire job of BuckTrax is telling you which buck is on which camera. A confidently wrong sex label doesn't just miss; it corrupts the profile you're planning a hunt around. <strong>A wrong answer is worse than no answer.</strong></p>
+<h3>Fix</h3>
+<p>Make uncertainty a <strong>first-class output</strong>, not a failure state. Rear-only or ambiguous animals are stored as species <code>deer</code>, sex <code>unknown</code> — never guessed — and routed to a mobile swipe-triage queue where a human resolves them in about a second.</p>
+<h3>Result</h3>
+<p>Automation where the model is strong, a human where it isn't — and a dataset I'd actually trust to make a decision on.</p>
+<blockquote>This is the decision I'd defend hardest. It's tempting to optimize for the accuracy number, and guessing "doe" on every rear shot <em>raises</em> the accuracy number. It also makes the product useless. <strong>Measure the thing the user cares about, not the thing that's easy to measure.</strong></blockquote>
+`
+},
+
+{
+  id:"roadmap", group:"Running it",
+  title:"Roadmap", eyebrow:"What's next, and why in this order",
+  h1:"Roadmap",
+  lede:'Ordered by what unblocks the most downstream work — not by what sounds the most fun.',
+  body:`
+<h2 id="next">Next up</h2>
+<div class="flow">
+  <div class="step"><b>Now</b><p><strong>Get off the laptop</strong>A VPS ($8–12/mo) with Cloudflare R2 for images and Litestream for SQLite backup. Scrapers and GPU inference stay local and push results to a cloud API. <em>Highest-leverage item on the list</em> — an always-on host unblocks alerting, shared access for Cyle, and anything scheduled that shouldn't depend on a laptop being open.</p></div>
+  <div class="step"><b>Next</b><p><strong>Buck movement prediction</strong>Statistical condition-matching over historical sightings — "this buck moved in daylight on 6 of the 8 days with a NW wind under 45°F" — rather than an ML model. At current data volume an ML model would learn noise. The honest tool for the data I actually have.</p></div>
+  <div class="step"><b>Next</b><p><strong>Moultrie + Tactacam scrapers</strong>Two more vendors into the same normalized record. Nothing downstream changes.</p></div>
+  <div class="step"><b>Later</b><p><strong>Antler detection (v2)</strong>Point count and spread estimation, to tell two mature bucks apart automatically instead of by eye.</p></div>
+  <div class="step"><b>Later</b><p><strong>Property analysis</strong>Elevation, food, water and crop data layered onto the map — to explain <em>why</em> a camera is productive, not just that it is.</p></div>
+</div>
+
+<h2 id="parked">Deliberately parked</h2>
+<table>
+  <tr><th>Idea</th><th>Why not yet</th></tr>
+  <tr><td>Train a custom detector</td><td>Not enough labelled data to beat a general VLM. It would be learning noise.</td></tr>
+  <tr><td>Postgres</td><td>SQLite handles this load fine once the concurrency config is right. Migrating solves a problem I don't have.</td></tr>
+  <tr><td>SPA refactor</td><td>The <code>nav.js</code> shell gave most of the benefit for a fraction of the cost. Revisit if the app grows.</td></tr>
+  <tr><td>Raspberry Pi host</td><td>Still on the table as a cheaper always-on box than a VPS. Being weighed <em>against</em> the VPS, not in addition to it.</td></tr>
+</table>
+
+<h2 id="principle">The ordering principle</h2>
+<blockquote><strong>Fix foundational data problems before building features that depend on them.</strong> The missing buck-metadata JOIN blocked both the homepage hero cards <em>and</em> movement prediction. Two features, dead on arrival, until one query was right. Sequencing is a design decision.</blockquote>
+`
+},
+
+{
+  id:"stack", group:"Reference",
+  title:"Stack", eyebrow:"Reference · what it's built with",
+  h1:"Stack",
+  lede:'Built and operated solo, end to end — from the camera in the field to the phone in the tree stand.',
+  body:`
+<h2 id="list">By layer</h2>
+<table>
+  <tr><th>Layer</th><th>Tools</th></tr>
+  <tr><td>Backend</td><td>Python · FastAPI · SQLite · REST · numbered scoped migrations</td></tr>
+  <tr><td>ML &amp; vision</td><td>Qwen3-VL-4B · Kaggle T4 GPU · prompt-based classification · human-in-the-loop triage</td></tr>
+  <tr><td>Data acquisition</td><td>Playwright (Cuddeback, Spypoint) · Open-Meteo weather API</td></tr>
+  <tr><td>Frontend</td><td>Vanilla JS · HTML/CSS · Leaflet · ESRI topo &amp; hillshade · mobile PWA</td></tr>
+  <tr><td>Operations</td><td>Tailscale VPN · Windows Task Scheduler · auto-restart supervisor · ingest health guards</td></tr>
+  <tr><td>Planned</td><td>VPS · Cloudflare R2 · Litestream</td></tr>
+</table>
+
+<h2 id="prior">Tried and dropped</h2>
+<table>
+  <tr><th>Was</th><th>Now</th><th>Why</th></tr>
+  <tr><td>Hosted vision API</td><td>Qwen3-VL-4B on Kaggle</td><td>Per-image billing scaled with the thing I wanted to grow.</td></tr>
+  <tr><td>MegaDetector + ResNet</td><td>Qwen3-VL-4B</td><td>Two models, no concept of sex or antlers. Less answer for more maintenance.</td></tr>
+  <tr><td>Duplicated page navigation</td><td>Shared <code>nav.js</code> shell</td><td>90% of an SPA's benefit, 5% of the work, zero build step.</td></tr>
+</table>
+`
+},
+
+{
+  id:"glossary", group:"Reference",
+  title:"Glossary", eyebrow:"Reference · two vocabularies",
+  h1:"Glossary",
+  lede:'This project sits between two worlds that don\'t share a vocabulary. Here\'s both.',
+  body:`
+<h2 id="hunting">Hunting terms</h2>
+<table>
+  <tr><th>Term</th><th>Means</th></tr>
+  <tr><td>Buck / doe / fawn</td><td>Male, female, and young deer. Sex determines almost everything in this system.</td></tr>
+  <tr><td>Mature buck</td><td>An older male, typically 3.5+ years. The target animals — what "target buck profiles" are about.</td></tr>
+  <tr><td>Daylight activity</td><td>Movement during legal shooting hours. A buck that only appears at 2am is, for hunting purposes, invisible.</td></tr>
+  <tr><td>Funnel / pinch point</td><td>Terrain that forces deer through a narrow path. Why the map carries topo and hillshade layers rather than roads.</td></tr>
+  <tr><td>Stand</td><td>Where you sit. "Which stand do I sit tonight" is the question the whole product answers.</td></tr>
+  <tr><td>Trail camera</td><td>Motion-triggered camera left in the woods. Cellular models upload to a vendor cloud — which is where the scrapers come in.</td></tr>
+</table>
+
+<h2 id="system">System terms</h2>
+<table>
+  <tr><th>Term</th><th>Means</th></tr>
+  <tr><td><strong>Detection</strong></td><td>One row per photo, describing its primary subject. Never more than one per photo.</td></tr>
+  <tr><td><strong>Primary subject</strong></td><td>The animal a photo is "about," by priority <code>buck &gt; doe &gt; fawn &gt; highest-confidence other</code>.</td></tr>
+  <tr><td><strong>Triage</strong></td><td>Human review of anything the model marked <code>unknown</code>. A swipe on a phone.</td></tr>
+  <tr><td><strong>Health guard</strong></td><td>Ingest check that aborts a run if ≥50% of records errored.</td></tr>
+  <tr><td><strong>Preflight</strong></td><td>Check that refuses to push a Kaggle notebook missing required markers.</td></tr>
+  <tr><td><strong>Scoped migration</strong></td><td>A migration constrained by <code>created_at</code>, so it fixes bad rows without rewriting history.</td></tr>
+  <tr><td><strong>Normalized record</strong></td><td>The common photo shape every vendor scraper emits. Vendor quirks stop at the boundary.</td></tr>
+</table>
+`
+},
+
+];
+
+/* ============================================================
+   ROUTER · NAV · TOC · SEARCH
+   ============================================================ */
+const $ = s => document.querySelector(s);
+const nav = $("#nav"), doc = $("#doc"), tocEl = $("#toc");
+
+(function buildNav(){
+  let html = "", lastGroup = null, n = 0;
+  PAGES.forEach(p => {
+    if (p.group !== lastGroup){ html += "<h4>" + p.group + "</h4>"; lastGroup = p.group; }
+    n++;
+    html += '<a href="#/' + p.id + '" data-id="' + p.id + '"><em>' +
+            String(n).padStart(2,"0") + "</em>" + p.title + "</a>";
+  });
+  nav.innerHTML = html;
+})();
+
+let headObs;
+function observeHeads(heads){
+  if (headObs) headObs.disconnect();
+  if (!heads.length) return;
+  headObs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting){
+        tocEl.querySelectorAll("a").forEach(a => a.classList.toggle("on", a.dataset.h === e.target.id));
+      }
+    });
+  }, { rootMargin: "-70px 0px -70% 0px" });
+  heads.forEach(h => headObs.observe(h));
+}
+
+function render(){
+  const id = location.hash.replace("#/","") || "overview";
+  let i = PAGES.findIndex(p => p.id === id);
+  if (i < 0) i = 0;
+  const p = PAGES[i], prev = PAGES[i-1], next = PAGES[i+1];
+
+  doc.innerHTML =
+    '<p class="crumbs"><a href="#/overview">BuckTrax</a> &nbsp;/&nbsp; ' + p.group + ' &nbsp;/&nbsp; ' + p.title + '</p>' +
+    '<p class="osd">' + p.eyebrow + '</p>' +
+    '<h1>' + p.h1 + '</h1>' +
+    '<p class="lede">' + p.lede + '</p>' +
+    p.body +
+    '<div class="pager">' +
+      (prev ? '<a class="prev" href="#/'+prev.id+'"><span>← Previous</span><strong>'+prev.title+'</strong></a>'
+            : '<a class="empty" aria-hidden="true"></a>') +
+      (next ? '<a class="next" href="#/'+next.id+'"><span>Next →</span><strong>'+next.title+'</strong></a>'
+            : '<a class="empty" aria-hidden="true"></a>') +
+    '</div>';
+
+  nav.querySelectorAll("a").forEach(a => a.classList.toggle("on", a.dataset.id === p.id));
+
+  const heads = [...doc.querySelectorAll("h2[id]")];
+  tocEl.innerHTML = heads.length
+    ? heads.map(h => '<a href="#'+h.id+'" data-h="'+h.id+'">'+h.textContent+'</a>').join("")
+    : '<p class="empty">—</p>';
+
+  window.scrollTo(0,0);
+  closeSide();
+  observeHeads(heads);
+}
+
+/* --- search over titles + full text --- */
+const q = $("#q"), results = $("#results");
+const INDEX = PAGES.map(p => ({
+  id: p.id, title: p.title,
+  text: (p.lede + " " + p.body).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().toLowerCase()
+}));
+
+q.addEventListener("input", () => {
+  const term = q.value.trim().toLowerCase();
+  if (term.length < 2){ results.hidden = true; return; }
+  const hits = INDEX.filter(p => p.title.toLowerCase().includes(term) || p.text.includes(term));
+  results.hidden = false;
+  results.innerHTML = hits.length
+    ? hits.map(h => {
+        const at = h.text.indexOf(term);
+        const snip = at > -1 ? "…" + h.text.slice(Math.max(0, at-30), at+56).trim() + "…" : "";
+        return '<a href="#/'+h.id+'"><b>'+h.title+'</b>'+snip+'</a>';
+      }).join("")
+    : '<p class="none">No results for “'+term+'”</p>';
+});
+results.addEventListener("click", () => { q.value = ""; results.hidden = true; });
+
+addEventListener("keydown", e => {
+  if (e.key === "/" && document.activeElement !== q){ e.preventDefault(); q.focus(); }
+  if (e.key === "Escape"){ q.value = ""; results.hidden = true; q.blur(); }
+});
+
+/* --- mobile drawer --- */
+const side = $("#side"), scrim = $("#scrim");
+function closeSide(){ side.classList.remove("open"); scrim.classList.remove("on"); }
+$("#burger").addEventListener("click", () => { side.classList.add("open"); scrim.classList.add("on"); });
+scrim.addEventListener("click", closeSide);
+
+addEventListener("hashchange", () => { if (location.hash.startsWith("#/")) render(); });
+render();
+</script>
+</body>
+</html>
